@@ -1,144 +1,89 @@
-import ctypes
-from build import build_lib
 import numpy as np
+from pyscf import gto, scf
 
-_cint = build_lib()
-
-_cint.cint1e_ovlp_sph.argtypes = [
-    np.ctypeslib.ndpointer(dtype=np.double, ndim=2),
-    (ctypes.c_int * 2),
-    np.ctypeslib.ndpointer(dtype=np.int32, ndim=2),
-    ctypes.c_int,
-    np.ctypeslib.ndpointer(dtype=np.int32, ndim=2),
-    ctypes.c_int,
-    np.ctypeslib.ndpointer(dtype=np.double, ndim=1),
-]
-_cint.cint1e_ovlp_sph.restype = ctypes.c_int
-
-_cint.cint1e_ovlp_cart.argtypes = [
-    np.ctypeslib.ndpointer(dtype=np.double, ndim=2),
-    (ctypes.c_int * 2),
-    np.ctypeslib.ndpointer(dtype=np.int32, ndim=2),
-    ctypes.c_int,
-    np.ctypeslib.ndpointer(dtype=np.int32, ndim=2),
-    ctypes.c_int,
-    np.ctypeslib.ndpointer(dtype=np.double, ndim=1),
-]
-_cint.cint1e_ovlp_cart.restype = ctypes.c_int
-
-def get_shell_dim_sph(bas, i):
-    ang = bas[i, 1]  
-    ncont = bas[i, 3]  
-    if ncont > 1:
-        return ncont * (2 * ang + 1)
-    else:
-        return 2 * ang + 1 
-
-def get_shell_dim_cart(bas, i):
-    ang = bas[i, 1]  
-    return (ang + 1) * (ang + 2) // 2  
-
-def get_shell_loc_sph(bas, i):
-    loc = 0
-    for j in range(i):
-        loc += get_shell_dim_sph(bas, j)
-    return loc
-
-def get_shell_loc_cart(bas, i):
-    loc = 0
-    for j in range(i):
-        loc += get_shell_dim_cart(bas, j)
-    return loc
-
-def ovlp_sph(mol):
-    atm = mol._atm
-    bas = mol._bas
-    env = mol._env
-    natm = atm.shape[0]
-    nbas = bas.shape[0]
+def molecular_orbital_transformation():
+    mol_sph = gto.M(atom="H 0 0 0; F 0 0 1", basis="6-31g", verbose=4)
+    mf_sph = scf.RHF(mol_sph)
+    mf_sph.kernel()
+    C_sph = mf_sph.mo_coeff
     
-    total_dim = 0
-    for i in range(nbas):
-        total_dim += get_shell_dim_sph(bas, i)
 
-    S = np.zeros((total_dim, total_dim))
+    ovlp_sph = mol_sph.intor("int1e_ovlp_sph")
+    kin_sph = mol_sph.intor("int1e_kin_sph")
+    nuc_sph = mol_sph.intor("int1e_nuc_sph")
+    eri_sph = mol_sph.intor("int2e_sph", aosym="s1")
+    h1e_sph = kin_sph + nuc_sph
     
-    for i in range(nbas):
-        for j in range(nbas):
-            di = get_shell_dim_sph(bas, i)
-            dj = get_shell_dim_sph(bas, j)
-            buf = np.empty((di, dj), order="F")
-            
-            if (_cint.cint1e_ovlp_sph(
-                buf,
-                (ctypes.c_int * 2)(i, j),
-                atm,
-                natm,
-                bas,
-                nbas,
-                env,
-            ) == 0):
-                raise RuntimeError("cint1e_ovlp_sph failed")
-            
-            loc_i = get_shell_loc_sph(bas, i)
-            loc_j = get_shell_loc_sph(bas, j)
-            S[loc_i:loc_i+di, loc_j:loc_j+dj] = buf
+    # 单电子积分转换
+    h1e_mo_sph = np.einsum('pi,pq,qj->ij', C_sph, h1e_sph, C_sph)
+    # 双电子积分转换
+    eri_mo_sph = np.einsum('pi,qj,rk,sl,pqrs->ijkl', C_sph, C_sph, C_sph, C_sph, eri_sph)
     
-    return S
+    mol_cart = gto.M(atom="H 0 0 0; F 0 0 1", basis="6-31g", cart=True, verbose=4)
+    
+    mf_cart = scf.RHF(mol_cart)  
+    mf_cart.kernel()
+    C_cart = mf_cart.mo_coeff
+    
+   
+    ovlp_cart = mol_cart.intor("int1e_ovlp_cart")
+    kin_cart = mol_cart.intor("int1e_kin_cart")
+    nuc_cart = mol_cart.intor("int1e_nuc_cart")
+    eri_cart = mol_cart.intor("int2e_cart", aosym="s1")
 
-def ovlp_cart(mol):
-    atm = mol._atm
-    bas = mol._bas
-    env = mol._env
-    natm = atm.shape[0]
-    nbas = bas.shape[0]
+    h1e_cart = kin_cart + nuc_cart
     
-    total_dim = 0
-    for i in range(nbas):
-        total_dim += get_shell_dim_cart(bas, i)
+    # 单电子积分转换
+    h1e_mo_cart = np.einsum('pi,pq,qj->ij', C_cart, h1e_cart, C_cart)
+    # 双电子积分转换
+    eri_mo_cart = np.einsum('pi,qj,rk,sl,pqrs->ijkl', C_cart, C_cart, C_cart, C_cart, eri_cart)
     
-    S = np.zeros((total_dim, total_dim))
-    
-    for i in range(nbas):
-        for j in range(nbas):
-            di = get_shell_dim_cart(bas, i)
-            dj = get_shell_dim_cart(bas, j)
-            buf = np.empty((di, dj), order="F")
-            
-            if (_cint.cint1e_ovlp_cart(
-                buf,
-                (ctypes.c_int * 2)(i, j),
-                atm,
-                natm,
-                bas,
-                nbas,
-                env,
-            ) == 0):
-                raise RuntimeError("cint1e_ovlp_cart failed")
-            
-            loc_i = get_shell_loc_cart(bas, i)
-            loc_j = get_shell_loc_cart(bas, j)
-            S[loc_i:loc_i+di, loc_j:loc_j+dj] = buf
-    
-    return S
+    return {
+        'sph': {
+            'mol': mol_sph, 'mf': mf_sph, 'C': C_sph,
+            'h1e_mo': h1e_mo_sph, 'eri_mo': eri_mo_sph,
+            'h1e_ao': h1e_sph, 'eri_ao': eri_sph, 'ovlp': ovlp_sph
+        },
+        'cart': {
+            'mol': mol_cart, 'mf': mf_cart, 'C': C_cart,
+            'h1e_mo': h1e_mo_cart, 'eri_mo': eri_mo_cart,
+            'h1e_ao': h1e_cart, 'eri_ao': eri_cart, 'ovlp': ovlp_cart
+        }
+    }
 
 if __name__ == "__main__":
-    from pyscf import gto
-
-    mol = gto.M(
-        atom="O 0.0 0.0 0.0",
-        basis="anorcc",
-        spin=0, 
-        charge=0,
-    )
+    results = molecular_orbital_transformation()
     
-    print(" 球谐坐标 ")
-    S_sph = ovlp_sph(mol)
-    print(S_sph)
-
-    ovlp = mol.intor("int1e_ovlp")
-    print(ovlp)
-
-    assert np.allclose(S_sph, ovlp)
-
-    print(mol._bas)
+    print(" 球谐坐标结果 ：")
+    print(f"HF能量: {results['sph']['mf'].e_tot:.8f}")
+    print(f"轨道系数形状: {results['sph']['C'].shape}")
+    print(f"分子轨道单电子积分形状: {results['sph']['h1e_mo'].shape}")
+    print(f"分子轨道双电子积分形状: {results['sph']['eri_mo'].shape}")
+    
+    nocc_sph = results['sph']['mol'].nelectron // 2
+    mo_energy_sph = np.diag(results['sph']['h1e_mo'])
+    print(f"\n前几个分子轨道能量:")
+    for i in range(min(4, len(mo_energy_sph))):
+        occ = "占据" if i < nocc_sph else "空"
+        print(f"轨道 {i}: {mo_energy_sph[i]:.6f} ({occ})")
+    
+    print(f"\n重要双电子积分:")
+    print(f"(00|00) = {results['sph']['eri_mo'][0,0,0,0]:.6f}")
+    
+    # 显示结果 - 笛卡尔坐标
+    print("\n笛卡尔坐标结果：")
+    print(f"HF能量: {results['cart']['mf'].e_tot:.8f}")
+    print(f"轨道系数形状: {results['cart']['C'].shape}")
+    print(f"分子轨道单电子积分形状: {results['cart']['h1e_mo'].shape}")
+    print(f"分子轨道双电子积分形状: {results['cart']['eri_mo'].shape}")
+    
+    nocc_cart = results['cart']['mol'].nelectron // 2
+    mo_energy_cart = np.diag(results['cart']['h1e_mo'])
+    print(f"\n前几个分子轨道能量:")
+    for i in range(min(4, len(mo_energy_cart))):
+        occ = "占据" if i < nocc_cart else "空"
+        print(f"轨道 {i}: {mo_energy_cart[i]:.6f} ({occ})")
+    
+    print(f"\n重要双电子积分:")
+    print(f"(00|00) = {results['cart']['eri_mo'][0,0,0,0]:.6f}")
+    
